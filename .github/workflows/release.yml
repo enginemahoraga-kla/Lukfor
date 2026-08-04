@@ -1,0 +1,46 @@
+name: Release
+
+# Push a tag like v0.2.0 and this builds the installer and publishes it
+# as a GitHub Release — no local build needed.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Lukfor ${{ github.ref_name }}
+          releaseBody: |
+            Unduh `Lukfor_<versi>_x64-setup.exe` di bawah, lalu jalankan.
+
+            Tidak butuh hak admin. Installer belum ditandatangani, jadi
+            SmartScreen akan memberi peringatan — klik **More info → Run anyway**.
+
+            Setelah terpasang, tekan `Alt+Space` untuk membuka.
+          releaseDraft: true

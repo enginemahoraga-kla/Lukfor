@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # Type-checks the frontend and produces dist/ that Tauri embeds.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check Rust
+        working-directory: src-tauri
+        run: cargo check --release
+
+      # Only the environment-independent tests run here. The icon tests need a
+      # real Start Menu and installed Store apps, so they are a local concern.
+      - name: Test indexer
+        working-directory: src-tauri
+        run: cargo test --release indexer::

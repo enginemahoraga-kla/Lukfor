@@ -34,21 +34,63 @@ Dibangun dengan Tauri 2 + React + TypeScript.
 
 ## Instalasi
 
-Unduh `Lukfor_<versi>_x64-setup.exe` dari halaman
-[Releases](../../releases), lalu jalankan.
+Yang dibutuhkan: **Windows 10/11 64-bit**. Tidak perlu hak administrator, dan
+tidak perlu memasang Node, Rust, atau apa pun — cukup satu file installer.
 
-- Tidak butuh hak admin — terpasang ke `%LOCALAPPDATA%\Lukfor`.
-- WebView2 diinstal otomatis bila belum ada (Windows 11 sudah bawaan).
-- Installer belum ditandatangani, jadi SmartScreen akan memberi peringatan:
-  klik **More info → Run anyway**.
+### Langkah 1 — Unduh installer
 
-Uninstall lewat **Apps & Features**, atau jalankan
-`%LOCALAPPDATA%\Lukfor\uninstall.exe`.
+Buka halaman **[Releases](../../releases/latest)**, lalu di bagian **Assets**
+klik file bernama:
 
-### Menjalankan otomatis saat login
+```
+Lukfor_0.1.0_x64-setup.exe
+```
 
-Installer tidak memasang autostart. Untuk mengaktifkannya, jalankan sekali di
-PowerShell:
+Ukurannya sekitar 2 MB.
+
+### Langkah 2 — Jalankan installer
+
+Klik dua kali file yang barusan diunduh.
+
+> **Windows akan menampilkan layar biru bertuliskan "Windows protected your PC".**
+> Ini normal dan bukan berarti file-nya berbahaya — peringatan itu muncul karena
+> installer belum ditandatangani dengan sertifikat berbayar (harganya ratusan
+> dolar per tahun), jadi Windows belum mengenalinya.
+>
+> Cara melewatinya:
+>
+> 1. Klik **More info** (tulisan kecil di bawah judul)
+> 2. Klik tombol **Run anyway** yang baru muncul
+>
+> Kalau kamu ragu, kamu selalu bisa membangun installer-nya sendiri dari source
+> code di repo ini — lihat bagian [Build rilis](#build-rilis).
+
+Setelah itu installer berjalan sendiri tanpa pertanyaan apa pun dan langsung
+selesai. Lukfor terpasang di `%LOCALAPPDATA%\Lukfor`.
+
+Kalau WebView2 belum ada di komputermu, installer akan mengunduhnya otomatis
+(butuh koneksi internet). Windows 11 sudah membawanya sejak awal, jadi biasanya
+langkah ini terlewat begitu saja.
+
+### Langkah 3 — Buka Lukfor
+
+Lukfor **tidak membuat ikon di desktop** dan tidak muncul di taskbar — memang
+begitu desainnya. Cara membukanya:
+
+- Tekan **`Alt` + `Space`**, atau
+- Cari "Lukfor" di Start Menu untuk pertama kali
+
+Panel pencarian akan muncul di tengah layar. Ketik apa saja untuk mencari
+aplikasi dan file, lalu tekan `Enter` untuk membuka. Tekan `Esc` atau klik di
+luar panel untuk menutupnya.
+
+> Saat pertama dijalankan, Lukfor perlu beberapa detik untuk memindai isi
+> komputer. Jumlah item yang sudah terindeks terlihat di pojok kanan bawah panel.
+
+### Langkah 4 (opsional) — Jalankan otomatis saat login
+
+Installer sengaja tidak memasang autostart. Kalau kamu mau Lukfor selalu siap
+setiap kali komputer menyala, buka **PowerShell** lalu tempel perintah ini:
 
 ```powershell
 $exe = "$env:LOCALAPPDATA\Lukfor\lukfor.exe"
@@ -56,6 +98,30 @@ $s = (New-Object -ComObject WScript.Shell).CreateShortcut(
     "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Lukfor.lnk")
 $s.TargetPath = $exe; $s.WorkingDirectory = (Split-Path $exe); $s.Save()
 ```
+
+Untuk membatalkannya, hapus file
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Lukfor.lnk`.
+
+### Uninstall
+
+Lewat **Settings → Apps → Installed apps → Lukfor → Uninstall**, atau jalankan
+`%LOCALAPPDATA%\Lukfor\uninstall.exe`.
+
+### Kalau `Alt+Space` tidak berfungsi
+
+1. **Pastikan Lukfor memang berjalan.** Cek dengan `Get-Process lukfor` di
+   PowerShell. Kalau kosong, jalankan `%LOCALAPPDATA%\Lukfor\lukfor.exe`.
+2. **Pastikan hanya ada satu instance.** Kalau perintah di atas menampilkan
+   lebih dari satu baris, instance kedua kalah berebut `Alt+Space` dan diam-diam
+   memakai kombinasi cadangan. Tutup semua lalu buka satu saja:
+   ```powershell
+   Get-Process lukfor | Stop-Process -Force
+   Start-Process "$env:LOCALAPPDATA\Lukfor\lukfor.exe"
+   ```
+3. **Cek hotkey yang benar-benar aktif.** Aplikasi lain (misalnya PowerToys Run)
+   mungkin sudah memakai `Alt+Space`. Kombinasi yang sedang dipakai Lukfor
+   tertulis di pojok kiri bawah panel, dan juga di
+   `%LOCALAPPDATA%\Lukfor\lukfor.log`.
 
 ## Development
 
