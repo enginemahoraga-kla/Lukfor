@@ -1,0 +1,177 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+}
+
+.backdrop {
+  height: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 8px;
+}
+
+.panel {
+  width: 640px;
+  max-height: 440px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(24, 24, 28, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  color: #e8e8ea;
+}
+
+.panel-in {
+  animation: fadeIn 120ms ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.inputWrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.prompt {
+  color: #8b7cf6;
+  font-size: 14px;
+}
+
+.inputWrap input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #f2f2f4;
+  font-size: 20px;
+  font-weight: 350;
+  caret-color: #8b7cf6;
+}
+
+.inputWrap input::placeholder {
+  color: #55555e;
+}
+
+.flash {
+  font-size: 12px;
+  color: #7ee2a8;
+  white-space: nowrap;
+}
+
+.results {
+  overflow-y: auto;
+  padding: 6px;
+  flex: 1;
+}
+
+.results::-webkit-scrollbar {
+  width: 8px;
+}
+.results::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  cursor: default;
+  min-height: 38px;
+}
+
+.row.selected {
+  background: rgba(139, 124, 246, 0.16);
+}
+
+.row .icon {
+  width: 22px;
+  text-align: center;
+  font-size: 15px;
+  color: #a99ef8;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.row .appicon {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+.row .name {
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  max-width: 55%;
+}
+
+.row .name.mono {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 18px;
+  color: #7ee2a8;
+  max-width: none;
+}
+
+.row .name.clip {
+  max-width: 75%;
+  color: #cfcfd4;
+}
+
+.row .sub {
+  font-size: 12px;
+  color: #63636d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  text-align: right;
+  direction: rtl; /* show tail of long paths */
+}
+
+.row.hint .name {
+  color: #63636d;
+  font-size: 13px;
+  max-width: none;
+}
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 7px 16px;
+  font-size: 11px;
+  color: #55555e;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
