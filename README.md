@@ -74,11 +74,13 @@ langkah ini terlewat begitu saja.
 
 ### Langkah 3 — Buka Lukfor
 
-Lukfor **tidak membuat ikon di desktop** dan tidak muncul di taskbar — memang
-begitu desainnya. Cara membukanya:
+Installer membuat pintasan di **desktop** dan di **Start Menu**. Pakai salah
+satunya untuk menjalankan Lukfor pertama kali.
 
-- Tekan **`Alt` + `Space`**, atau
-- Cari "Lukfor" di Start Menu untuk pertama kali
+Setelah berjalan, cara membukanya cukup tekan **`Alt` + `Space`**. Lukfor
+sengaja tidak muncul di taskbar — ia menunggu diam-diam di latar belakang
+sampai hotkey ditekan, jadi jangan bingung kalau setelah diklik seolah tidak
+terjadi apa-apa.
 
 Panel pencarian akan muncul di tengah layar. Ketik apa saja untuk mencari
 aplikasi dan file, lalu tekan `Enter` untuk membuka. Tekan `Esc` atau klik di
