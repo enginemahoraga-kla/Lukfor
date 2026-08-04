@@ -36,6 +36,7 @@ jobs:
 
       # Only the environment-independent tests run here. The icon tests need a
       # real Start Menu and installed Store apps, so they are a local concern.
+      # Quoted because a trailing "::" would otherwise be parsed as YAML mapping.
       - name: Test indexer
         working-directory: src-tauri
-        run: cargo test --release indexer::
+        run: "cargo test --release indexer::"
