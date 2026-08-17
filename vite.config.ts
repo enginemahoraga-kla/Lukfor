@@ -7,6 +7,12 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    watch: {
+      // Cargo writes the binary into src-tauri/target while the app builds.
+      // Watching that tree races the linker and kills the dev server with
+      // EBUSY on Windows — and nothing in it is a frontend source anyway.
+      ignored: ["**/src-tauri/**"],
+    },
   },
   build: {
     target: "chrome120",
