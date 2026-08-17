@@ -111,8 +111,10 @@ impl Indexer {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
+            crate::log_line("rebuild requested, but one is already running");
             return false;
         }
+        crate::log_line("rebuild requested");
         let ix = self.clone();
         std::thread::spawn(move || build_index(&ix, Mode::Atomic));
         true
