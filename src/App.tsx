@@ -9,7 +9,16 @@ type Row =
   | { type: "web"; query: string }
   | { type: "clip"; entry: ClipEntry }
   | { type: "entry"; entry: SearchResult }
+  | { type: "reindex" }
   | { type: "hint"; text: string };
+
+// Typing any of these (from 3 characters on) offers the rebuild action.
+const REINDEX_WORDS = ["reindex", "refresh", "update"];
+
+function looksLikeReindex(q: string): boolean {
+  const lower = q.toLowerCase();
+  return lower.length >= 3 && REINDEX_WORDS.some((w) => w.startsWith(lower));
+}
 
 const KIND_ICON: Record<string, string> = {
   app: "▸", // ▸
@@ -61,6 +70,9 @@ export default function App() {
   const inputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const seqRef = useRef(0);
+  // A rebuild the user asked for reports when it lands; one the backend started
+  // on its own (a stale index refreshing on open) finishes quietly.
+  const askedForRebuild = useRef(false);
 
   const hide = useCallback(() => {
     invoke("hide_window").catch(() => {});
@@ -72,7 +84,7 @@ export default function App() {
     const q = query.trim();
 
     if (!q) {
-      setRows([{ type: "hint", text: "Type to search apps & files  ·  math for calc  ·  g: web  ·  cb clipboard" }]);
+      setRows([{ type: "hint", text: "Search apps & files  ·  math for calc  ·  g: web  ·  cb clipboard  ·  Ctrl+R reindex" }]);
       setSel(0);
       return;
     }
@@ -113,20 +125,39 @@ export default function App() {
       }
     }
 
+    // "reindex" / "refresh" / "update" offer the rebuild action on top of the
+    // normal results, so a file that happens to match is still reachable.
+    const head: Row[] = looksLikeReindex(q) ? [{ type: "reindex" }] : [];
+    if (head.length) {
+      setRows(head);
+      setSel(0);
+    }
+
     // app / file / folder search (debounced lightly)
     const t = setTimeout(() => {
       invoke<SearchResult[]>("search", { query: q }).then((res) => {
         if (seqRef.current !== seq) return;
-        setRows(
-          res.length
-            ? res.map((entry) => ({ type: "entry" as const, entry }))
-            : [{ type: "hint", text: "No results — press Enter to search Google" }]
-        );
+        const tail: Row[] = res.length
+          ? res.map((entry) => ({ type: "entry" as const, entry }))
+          : head.length
+            ? []
+            : [{ type: "hint", text: "No results — press Enter to search Google" }];
+        setRows([...head, ...tail]);
         setSel(0);
       });
     }, 40);
     return () => clearTimeout(t);
   }, [query]);
+
+  // Rebuild the index now. The window stays open so the footer can report
+  // progress — this is the one action whose result the user waits for.
+  const reindex = useCallback(async () => {
+    askedForRebuild.current = true;
+    const started = await invoke<boolean>("reindex").catch(() => false);
+    setQuery("");
+    setFlash(started ? "Rebuilding index…" : "Already rebuilding…");
+    invoke<Status>("get_status").then(setStatus).catch(() => {});
+  }, []);
 
   const activate = useCallback(
     async (row: Row | undefined) => {
@@ -152,6 +183,9 @@ export default function App() {
           await invoke("open_entry", { path: row.entry.path });
           hide();
           break;
+        case "reindex":
+          await reindex();
+          break;
         case "hint":
           if (query.trim() && !query.trim().startsWith("cb")) {
             await invoke("open_url", {
@@ -162,12 +196,15 @@ export default function App() {
           break;
       }
     },
-    [hide, query]
+    [hide, query, reindex]
   );
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === "ArrowDown") {
+      if (e.key.toLowerCase() === "r" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        reindex();
+      } else if (e.key === "ArrowDown") {
         e.preventDefault();
         setSel((s) => Math.min(s + 1, rows.length - 1));
       } else if (e.key === "ArrowUp") {
@@ -178,8 +215,25 @@ export default function App() {
         activate(rows[sel]);
       }
     },
-    [rows, sel, activate, hide]
+    [rows, sel, activate, reindex]
   );
+
+  // While a rebuild runs, keep the footer count live and report when it lands.
+  useEffect(() => {
+    if (!status?.indexing) return;
+    const id = setInterval(() => {
+      invoke<Status>("get_status")
+        .then((next) => {
+          setStatus(next);
+          if (!next.indexing && askedForRebuild.current) {
+            askedForRebuild.current = false;
+            setFlash(`Index updated · ${next.indexed.toLocaleString()} items`);
+          }
+        })
+        .catch(() => {});
+    }, 700);
+    return () => clearInterval(id);
+  }, [status?.indexing]);
 
   // Esc must always close, even if focus has drifted off the input (e.g.
   // Tab moved it to the body), so listen at the window level rather than
@@ -215,6 +269,13 @@ export default function App() {
       un.then((f) => f());
     };
   }, []);
+
+  // Clear a finished flash on its own; "Rebuilding…" stays up until it lands.
+  useEffect(() => {
+    if (!flash || status?.indexing) return;
+    const id = setTimeout(() => setFlash(null), 2500);
+    return () => clearTimeout(id);
+  }, [flash, status?.indexing]);
 
   // Click outside the panel hides the window.
   const onBackdropClick = useCallback(
@@ -289,6 +350,15 @@ export default function App() {
                   <span className="name">{row.entry.name}</span>
                   <span className="sub path">
                     {row.entry.kind === "app" ? "App" : row.entry.path}
+                  </span>
+                </>
+              )}
+              {row.type === "reindex" && (
+                <>
+                  <span className="icon">&#8635;</span>
+                  <span className="name">Rebuild index</span>
+                  <span className="sub">
+                    {status?.indexing ? "running…" : "Ctrl+R · picks up new apps & folders"}
                   </span>
                 </>
               )}

@@ -14,6 +14,7 @@ Dibangun dengan Tauri 2 + React + TypeScript.
 | `2+2*3`, `sqrt(144)` | Kalkulator inline — Enter menyalin hasil |
 | `g: sesuatu` | Buka Google search di browser default |
 | `cb` / `cb kata` | Clipboard history (50 entri terakhir) — Enter menyalin kembali |
+| `reindex` / `refresh` / `update` | Bangun ulang index sekarang (sama dengan `Ctrl+R`) |
 
 - **Semua jenis aplikasi terindeks**, lengkap dengan logo aslinya:
   - Shortcut Start Menu (`.lnk` / `.url`)
@@ -28,8 +29,14 @@ Dibangun dengan Tauri 2 + React + TypeScript.
 - Index dibangun di background thread saat start: aplikasi dulu (instan), lalu
   folder user dengan batas kedalaman 8 dan maksimum 250.000 entri — pencarian
   tetap di bawah 250 ms walau file banyak.
-- Index otomatis dibangun ulang tiap hari jam 03.00 selama aplikasi berjalan.
-  Kalau laptop sleep melewati jam 3, rebuild jalan begitu bangun.
+- Index dibangun ulang otomatis di dua momen: tiap hari jam 03.00 selama
+  aplikasi berjalan (kalau laptop sleep melewati jam 3, rebuild jalan begitu
+  bangun), dan saat panel dibuka kalau index sudah lebih tua dari 6 jam.
+  Refresh saat buka panel jalan di background — kamu tinggal mengetik seperti
+  biasa, hasil lama tetap kepakai sampai yang baru siap.
+- **Baru pasang aplikasi atau bikin folder dan mau langsung kepakai?** Tekan
+  `Ctrl+R` (atau ketik `reindex`) untuk membangun ulang saat itu juga. Footer
+  menghitung entri sampai selesai, lalu melaporkan hasil akhirnya.
 - Clipboard watcher polling 800 ms, dedupe, maksimal 50 entri, hanya teks.
 
 ## Instalasi

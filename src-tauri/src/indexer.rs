@@ -3,11 +3,15 @@ use fuzzy_matcher::FuzzyMatcher;
 use serde::Serialize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
 
 const MAX_ENTRIES: usize = 250_000;
 const MAX_DEPTH: usize = 8;
+/// Opening the panel with an index older than this quietly refreshes it, so a
+/// program installed earlier today is findable without anyone pressing Ctrl+R.
+const STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
     ".git",
@@ -45,6 +49,102 @@ pub struct SearchResult {
 }
 
 pub type SharedIndex = Arc<RwLock<Vec<Entry>>>;
+
+/// The index plus everything needed to decide when to rebuild it. Cheap to
+/// clone — every field is shared, so a clone handed to a worker thread sees
+/// (and updates) the same state the UI reads.
+#[derive(Clone)]
+pub struct Indexer {
+    entries: SharedIndex,
+    indexing: Arc<AtomicBool>,
+    /// When the last build finished; `None` until the first one completes.
+    built_at: Arc<Mutex<Option<SystemTime>>>,
+}
+
+impl Indexer {
+    pub fn new() -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(Vec::new())),
+            indexing: Arc::new(AtomicBool::new(false)),
+            built_at: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.read().unwrap().len()
+    }
+
+    pub fn is_indexing(&self) -> bool {
+        self.indexing.load(Ordering::SeqCst)
+    }
+
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+        search(&self.entries, query, limit)
+    }
+
+    /// Is `path` an entry we produced? Callers check this before acting on a
+    /// path, so that only indexed entries are ever opened.
+    pub fn holds(&self, path: &str) -> bool {
+        self.matches(|e| e.path == path)
+    }
+
+    pub fn holds_app(&self, path: &str) -> bool {
+        self.matches(|e| e.path == path && e.kind == Kind::App)
+    }
+
+    fn matches(&self, pred: impl Fn(&Entry) -> bool) -> bool {
+        self.entries.read().unwrap().iter().any(pred)
+    }
+
+    /// Build the index on a background thread at startup.
+    pub fn spawn_startup_build(&self) {
+        let ix = self.clone();
+        std::thread::spawn(move || build_index(&ix, Mode::Progressive));
+    }
+
+    /// Rebuild on demand (user pressed refresh). Returns false — and does
+    /// nothing — when a build is already running, so repeated presses can't
+    /// stack threads.
+    pub fn request_rebuild(&self) -> bool {
+        if self
+            .indexing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        let ix = self.clone();
+        std::thread::spawn(move || build_index(&ix, Mode::Atomic));
+        true
+    }
+
+    /// How long ago the index was built. `None` while the first build is still
+    /// running — there is nothing to be stale yet. A clock that moved backwards
+    /// reads as zero rather than as an ancient index.
+    fn age(&self) -> Option<Duration> {
+        let built_at = (*self.built_at.lock().unwrap())?;
+        Some(
+            SystemTime::now()
+                .duration_since(built_at)
+                .unwrap_or(Duration::ZERO),
+        )
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.age().is_some_and(|age| age >= STALE_AFTER)
+    }
+
+    /// Refresh in the background if the index has gone stale. Called when the
+    /// panel opens; the old index stays fully searchable while it runs, so the
+    /// user just types as usual and gets fresher results a few seconds later.
+    pub fn refresh_if_stale(&self) -> bool {
+        if !self.is_stale() {
+            return false;
+        }
+        crate::log_line("index is stale, refreshing on open");
+        self.request_rebuild()
+    }
+}
 
 fn push_entry(out: &mut Vec<Entry>, name: &str, path: &Path, kind: Kind) {
     out.push(Entry {
@@ -163,7 +263,9 @@ fn index_uwp_apps(out: &mut Vec<Entry>) {
 fn index_uwp_apps(_out: &mut Vec<Entry>) {}
 
 /// User folders become file/folder entries, bounded by depth and count.
-fn index_files(index: &SharedIndex, total_apps: usize) {
+/// Batches are handed to `publish` as they fill, so the caller decides whether
+/// they go straight into the live index or into a buffer swapped in at the end.
+fn index_files(total_apps: usize, mut publish: impl FnMut(Vec<Entry>)) {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     for d in [
         dirs::desktop_dir(),
@@ -245,42 +347,63 @@ fn index_files(index: &SharedIndex, total_apps: usize) {
             });
             count += 1;
             if batch.len() >= 4096 {
-                index.write().unwrap().append(&mut batch);
+                publish(std::mem::replace(&mut batch, Vec::with_capacity(4096)));
             }
         }
     }
     if !batch.is_empty() {
-        index.write().unwrap().append(&mut batch);
+        publish(batch);
     }
 }
 
-/// Build (or rebuild) the index: apps first (instant results), then the
-/// larger file walk. Runs on the calling thread.
-fn build_index(index: &SharedIndex, indexing: &AtomicBool) {
-    indexing.store(true, Ordering::SeqCst);
+/// How a rebuild publishes its results.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Clear first, then fill as we go — the index is incomplete while the
+    /// walk runs. Right at startup, where partial results beat no results.
+    Progressive,
+    /// Build into a buffer and swap it in at the end, so the old index stays
+    /// fully searchable until the new one is ready. Used for every rebuild
+    /// that happens while the user may already be typing.
+    Atomic,
+}
+
+/// Build (or rebuild) the index: apps first, then the larger file walk.
+/// Runs on the calling thread.
+fn build_index(ix: &Indexer, mode: Mode) {
+    ix.indexing.store(true, Ordering::SeqCst);
+    let t0 = std::time::Instant::now();
     let mut apps = Vec::new();
     index_apps(&mut apps);
     index_uwp_apps(&mut apps);
     let n_apps = apps.len();
-    {
-        let mut w = index.write().unwrap();
-        w.clear();
-        w.append(&mut apps);
+
+    match mode {
+        Mode::Progressive => {
+            {
+                let mut w = ix.entries.write().unwrap();
+                w.clear();
+                w.append(&mut apps);
+            }
+            index_files(n_apps, |mut batch| {
+                ix.entries.write().unwrap().append(&mut batch);
+            });
+        }
+        Mode::Atomic => {
+            let mut fresh = apps;
+            index_files(n_apps, |mut batch| fresh.append(&mut batch));
+            *ix.entries.write().unwrap() = fresh;
+        }
     }
-    let t0 = std::time::Instant::now();
-    index_files(index, n_apps);
-    indexing.store(false, Ordering::SeqCst);
+
+    *ix.built_at.lock().unwrap() = Some(SystemTime::now());
+    ix.indexing.store(false, Ordering::SeqCst);
     crate::log_line(&format!(
         "index ready: {} apps, {} total entries in {:.1}s",
         n_apps,
-        index.read().unwrap().len(),
+        ix.len(),
         t0.elapsed().as_secs_f32()
     ));
-}
-
-/// Build the index on a background thread at startup.
-pub fn spawn_indexer(index: SharedIndex, indexing: Arc<AtomicBool>) {
-    std::thread::spawn(move || build_index(&index, &indexing));
 }
 
 fn next_run_after(now: chrono::NaiveDateTime) -> chrono::NaiveDateTime {
@@ -295,21 +418,24 @@ fn next_run_after(now: chrono::NaiveDateTime) -> chrono::NaiveDateTime {
 /// Rebuild the index every day at 03:00 local time while the app runs.
 /// Polling every minute (instead of one long sleep) also covers sleep or
 /// hibernate across 03:00 — the rebuild then fires right after wake-up.
-pub fn spawn_scheduler(index: SharedIndex, indexing: Arc<AtomicBool>) {
-    std::thread::spawn(move || {
-        let mut next_run = next_run_after(chrono::Local::now().naive_local());
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            let now = chrono::Local::now().naive_local();
-            if now >= next_run {
-                if !indexing.load(Ordering::SeqCst) {
-                    crate::log_line("scheduled 03:00 reindex starting");
-                    build_index(&index, &indexing);
+impl Indexer {
+    pub fn spawn_scheduler(&self) {
+        let ix = self.clone();
+        std::thread::spawn(move || {
+            let mut next_run = next_run_after(chrono::Local::now().naive_local());
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let now = chrono::Local::now().naive_local();
+                if now >= next_run {
+                    if !ix.is_indexing() {
+                        crate::log_line("scheduled 03:00 reindex starting");
+                        build_index(&ix, Mode::Atomic);
+                    }
+                    next_run = next_run_after(now);
                 }
-                next_run = next_run_after(now);
             }
-        }
-    });
+        });
+    }
 }
 
 pub fn search(index: &SharedIndex, query: &str, limit: usize) -> Vec<SearchResult> {
@@ -357,6 +483,7 @@ pub fn search(index: &SharedIndex, query: &str, limit: usize) -> Vec<SearchResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Timelike;
 
     fn synthetic_index(n: usize) -> SharedIndex {
         let mut v = Vec::with_capacity(n);
@@ -407,5 +534,71 @@ mod tests {
     fn empty_query_returns_nothing() {
         let idx = synthetic_index(10);
         assert!(search(&idx, "  ", 20).is_empty());
+    }
+
+    /// An Indexer that never runs a real build, so the scheduling rules can be
+    /// tested without walking the filesystem.
+    fn stub_indexer(indexing: bool, built_at: Option<SystemTime>) -> Indexer {
+        Indexer {
+            entries: synthetic_index(1),
+            indexing: Arc::new(AtomicBool::new(indexing)),
+            built_at: Arc::new(Mutex::new(built_at)),
+        }
+    }
+
+    #[test]
+    fn rebuild_is_refused_while_one_is_running() {
+        let ix = stub_indexer(true, None); // a build is in flight
+        assert!(
+            !ix.request_rebuild(),
+            "must not start a second rebuild while one is running"
+        );
+        // The in-flight build's flag is left untouched for it to clear itself.
+        assert!(ix.is_indexing());
+    }
+
+    #[test]
+    fn only_an_index_past_the_staleness_window_refreshes_on_open() {
+        let fresh = SystemTime::now() - (STALE_AFTER / 2);
+        assert!(
+            !stub_indexer(false, Some(fresh)).is_stale(),
+            "a recently built index must not be rebuilt on open"
+        );
+
+        let stale = SystemTime::now() - (STALE_AFTER + Duration::from_secs(60));
+        assert!(
+            stub_indexer(false, Some(stale)).is_stale(),
+            "an index older than the staleness window must refresh on open"
+        );
+    }
+
+    #[test]
+    fn first_build_still_running_is_not_treated_as_stale() {
+        // `built_at` is None until the startup build lands; opening the panel
+        // during it must not queue a second build.
+        assert!(!stub_indexer(true, None).is_stale());
+        assert!(!stub_indexer(true, None).refresh_if_stale());
+    }
+
+    #[test]
+    fn a_clock_jumping_backwards_does_not_trigger_a_rebuild() {
+        let future = SystemTime::now() + Duration::from_secs(24 * 60 * 60);
+        assert!(!stub_indexer(false, Some(future)).is_stale());
+    }
+
+    #[test]
+    fn scheduler_runs_at_03_00_the_next_day_once_past() {
+        let at_two = chrono::NaiveDate::from_ymd_opt(2026, 8, 17)
+            .unwrap()
+            .and_hms_opt(2, 0, 0)
+            .unwrap();
+        assert_eq!(next_run_after(at_two).hour(), 3);
+        assert_eq!(next_run_after(at_two).date(), at_two.date());
+
+        let at_four = at_two + chrono::Duration::hours(2);
+        assert_eq!(
+            next_run_after(at_four).date(),
+            at_two.date() + chrono::Duration::days(1)
+        );
     }
 }
