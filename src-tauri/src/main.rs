@@ -5,17 +5,15 @@ mod icons;
 mod indexer;
 
 use clipboard::SharedClips;
-use indexer::SharedIndex;
+use indexer::Indexer;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 struct AppState {
-    index: SharedIndex,
-    indexing: Arc<AtomicBool>,
+    indexer: Indexer,
     clips: SharedClips,
     hotkey: Mutex<String>,
     icon_cache: Mutex<HashMap<String, Option<String>>>,
@@ -52,17 +50,14 @@ fn log_line(msg: &str) {
 
 #[tauri::command]
 fn search(query: String, state: tauri::State<AppState>) -> Vec<indexer::SearchResult> {
-    indexer::search(&state.index, &query, 20)
+    state.indexer.search(&query, 20)
 }
 
 #[tauri::command]
 fn open_entry(path: String, state: tauri::State<AppState>) -> Result<(), String> {
     // Only open paths that came from our own index — never raw user input.
-    {
-        let idx = state.index.read().unwrap();
-        if !idx.iter().any(|e| e.path == path) {
-            return Err("unknown entry".into());
-        }
+    if !state.indexer.holds(&path) {
+        return Err("unknown entry".into());
     }
     // Store/UWP apps live in the shell AppsFolder namespace, not on disk —
     // they can't be opened as a file path, so launch via explorer.exe.
@@ -91,14 +86,8 @@ fn open_url(url: String) -> Result<(), String> {
 #[tauri::command]
 fn get_icon(path: String, state: tauri::State<AppState>) -> Option<String> {
     // Icons only for app entries from our own index — same rule as open_entry.
-    {
-        let idx = state.index.read().unwrap();
-        if !idx
-            .iter()
-            .any(|e| e.path == path && e.kind == indexer::Kind::App)
-        {
-            return None;
-        }
+    if !state.indexer.holds_app(&path) {
+        return None;
     }
     let mut cache = state.icon_cache.lock().unwrap();
     if let Some(hit) = cache.get(&path) {
@@ -129,9 +118,16 @@ fn clipboard_history(state: tauri::State<AppState>) -> Vec<clipboard::Clip> {
 fn get_status(state: tauri::State<AppState>) -> Status {
     Status {
         hotkey: state.hotkey.lock().unwrap().clone(),
-        indexed: state.index.read().unwrap().len(),
-        indexing: state.indexing.load(Ordering::SeqCst),
+        indexed: state.indexer.len(),
+        indexing: state.indexer.is_indexing(),
     }
+}
+
+/// Rebuild the index now, so apps and folders added since startup show up
+/// without waiting for the 03:00 pass. False = a build was already running.
+#[tauri::command]
+fn reindex(state: tauri::State<AppState>) -> bool {
+    state.indexer.request_rebuild()
 }
 
 #[tauri::command]
@@ -162,13 +158,16 @@ fn toggle_window(app: &tauri::AppHandle) {
         }
         let _ = win.set_focus();
         let _ = win.emit("lukfor://shown", ());
+        // Opening the panel is the one moment we know the user is about to
+        // search, so it's where a stale index gets refreshed — in the
+        // background, with the current results still live meanwhile.
+        app.state::<AppState>().indexer.refresh_if_stale();
     }
 }
 
 fn main() {
     let state = AppState {
-        index: Arc::new(RwLock::new(Vec::new())),
-        indexing: Arc::new(AtomicBool::new(false)),
+        indexer: Indexer::new(),
         clips: Arc::new(Mutex::new(VecDeque::new())),
         hotkey: Mutex::new(String::new()),
         icon_cache: Mutex::new(HashMap::new()),
@@ -188,8 +187,8 @@ fn main() {
         .manage(state)
         .setup(|app| {
             let state = app.state::<AppState>();
-            indexer::spawn_indexer(state.index.clone(), state.indexing.clone());
-            indexer::spawn_scheduler(state.index.clone(), state.indexing.clone());
+            state.indexer.spawn_startup_build();
+            state.indexer.spawn_scheduler();
             clipboard::spawn_watcher(state.clips.clone());
 
             // Alt+Space first (Spotlight-style); if another app owns it,
@@ -238,6 +237,7 @@ fn main() {
             copy_text,
             clipboard_history,
             get_status,
+            reindex,
             hide_window
         ])
         .run(tauri::generate_context!())
