@@ -1,3 +1,48 @@
+/*
+ * Lukfor: tactical-HUD look (see DESIGN.md). Dial ENERGY 2 / RHYTHM 1 / MOTION 1.
+ * Every text pairing below was measured with antislop's contrast checker;
+ * the lowest is 4.94:1.
+ */
+
+/* Dark is the default; the light set below takes over when Windows is light. */
+:root {
+  --bg: #0f1922;           /* navy-black: the HUD ground, warmer than pure black */
+  --text: #ece8e1;         /* off-white, 14.54:1 on --bg */
+  --dim: #8f9ba5;          /* secondary text, 6.26:1 */
+  --accent: #22c7a3;       /* teal (owner's pick): caret, focus line, star, flash; 8.26:1 */
+  --block: #22c7a3;        /* the selected row, the one focal point on screen */
+  --on-block: #0b1a1f;     /* 8.26:1 on --block */
+  --on-block-dim: #16463d; /* 4.94:1 on --block */
+  --line: rgba(236, 232, 225, 0.1);
+  --scroll: rgba(236, 232, 225, 0.2);
+  --shadow: rgba(0, 0, 0, 0.5);
+
+  /* DIN-rooted like the HUD type the direction points at, and it ships with
+     every Windows 10/11, so nothing is downloaded or bundled. */
+  --font: "Bahnschrift", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-narrow: "Bahnschrift SemiCondensed", "Bahnschrift", "Segoe UI", sans-serif;
+
+  /* The identity motif: one corner cut on the diagonal, repeated at panel
+     and selection scale. */
+  --cut: 18px;
+  --cut-small: 10px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ebe7df;
+    --text: #0f1922;         /* 14.40:1 */
+    --dim: #525d66;          /* 5.46:1 */
+    --accent: #076a59;       /* darker teal so it still reads on light: 5.30:1 */
+    --block: #076a59;
+    --on-block: #f4f1ea;     /* 5.79:1 */
+    --on-block-dim: #cfe9e1; /* 5.10:1 */
+    --line: rgba(15, 25, 34, 0.14);
+    --scroll: rgba(15, 25, 34, 0.25);
+    --shadow: rgba(15, 25, 34, 0.3);
+  }
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -10,8 +55,17 @@ body,
   height: 100%;
   background: transparent;
   overflow: hidden;
-  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font);
   user-select: none;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .backdrop {
@@ -22,27 +76,38 @@ body,
   padding-top: 8px;
 }
 
+/* The shadow lives on a wrapper: clip-path on the panel would cut it off.
+   One floating surface over the desktop, so elevation is the whole point. */
+.frame {
+  filter: drop-shadow(0 10px 18px var(--shadow));
+}
+
 .panel {
   width: 640px;
   max-height: 440px;
   display: flex;
   flex-direction: column;
-  background: rgba(24, 24, 28, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 14px;
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
-  overflow: hidden;
-  color: #e8e8ea;
+  background: var(--bg);
+  color: var(--text);
+  clip-path: polygon(
+    0 0,
+    calc(100% - var(--cut)) 0,
+    100% var(--cut),
+    100% 100%,
+    var(--cut) 100%,
+    0 calc(100% - var(--cut))
+  );
 }
 
+/* Says "I just appeared"; nothing else in the panel animates. */
 .panel-in {
-  animation: fadeIn 120ms ease-out;
+  animation: panelIn 110ms ease-out;
 }
 
-@keyframes fadeIn {
+@keyframes panelIn {
   from {
     opacity: 0;
-    transform: translateY(-6px) scale(0.985);
+    transform: translateY(-4px);
   }
   to {
     opacity: 1;
@@ -50,77 +115,122 @@ body,
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .panel-in {
+    animation: none;
+  }
+}
+
 .inputWrap {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 14px 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  gap: 12px;
+  padding: 16px 28px 13px 20px;
+  border-bottom: 2px solid var(--line);
 }
 
-.prompt {
-  color: #8b7cf6;
-  font-size: 14px;
+/* The input's focus indicator, replacing the browser outline: the rule under
+   it turns teal (8.26:1 dark, 5.30:1 light). */
+.inputWrap:focus-within {
+  border-bottom-color: var(--accent);
 }
 
 .inputWrap input {
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
-  color: #f2f2f4;
-  font-size: 20px;
-  font-weight: 350;
-  caret-color: #8b7cf6;
+  color: var(--text);
+  font-family: var(--font-narrow);
+  font-size: 22px;
+  font-weight: 400;
+  caret-color: var(--accent);
 }
 
 .inputWrap input::placeholder {
-  color: #55555e;
+  color: var(--dim);
+  opacity: 1;
 }
 
 .flash {
   font-size: 12px;
-  color: #7ee2a8;
+  color: var(--accent);
   white-space: nowrap;
+}
+
+/* Small uppercase labels are the HUD's labelling voice. Used on exactly two
+   things (this header and the footer), with modest tracking, not as a style. */
+.section,
+.footer {
+  font-family: var(--font-narrow);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.section {
+  padding: 10px 20px 2px;
 }
 
 .results {
   overflow-y: auto;
-  padding: 6px;
+  padding: 6px 0 8px;
   flex: 1;
 }
 
 .results::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
 }
 .results::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 4px;
+  background: var(--scroll);
 }
 
 .row {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 9px 12px;
-  border-radius: 8px;
+  margin: 0 8px;
+  padding: 8px 12px;
+  min-height: 40px;
   cursor: default;
-  min-height: 38px;
 }
 
+/* A solid block, not a tint: it is the only marker of the keyboard position,
+   so it has to read at a glance (8.26:1 against the panel). */
 .row.selected {
-  background: rgba(139, 124, 246, 0.16);
+  background: var(--block);
+  color: var(--on-block);
+  clip-path: polygon(
+    0 0,
+    100% 0,
+    100% calc(100% - var(--cut-small)),
+    calc(100% - var(--cut-small)) 100%,
+    0 100%
+  );
 }
 
 .row .icon {
   width: 22px;
-  text-align: center;
-  font-size: 15px;
-  color: #a99ef8;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  color: var(--dim);
+}
+
+.row .icon svg path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+}
+
+.row.selected .icon {
+  color: var(--on-block);
 }
 
 .row .appicon {
@@ -130,7 +240,7 @@ body,
 }
 
 .row .name {
-  font-size: 14px;
+  font-size: 15px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -138,21 +248,29 @@ body,
   max-width: 55%;
 }
 
-.row .name.mono {
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 18px;
-  color: #7ee2a8;
+.row.selected .name {
+  font-weight: 600;
+}
+
+/* Tabular figures so a result doesn't jitter sideways as digits change. */
+.row .name.result {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   max-width: none;
 }
 
 .row .name.clip {
   max-width: 75%;
-  color: #cfcfd4;
+}
+
+.row .name.missing {
+  color: var(--dim);
 }
 
 .row .sub {
   font-size: 12px;
-  color: #63636d;
+  color: var(--dim);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -161,17 +279,73 @@ body,
   direction: rtl; /* show tail of long paths */
 }
 
+.row.selected .sub,
+.row.selected .name.missing {
+  color: var(--on-block-dim);
+}
+
 .row.hint .name {
-  color: #63636d;
+  color: var(--dim);
   font-size: 13px;
   max-width: none;
+  white-space: normal;
+}
+
+/* Space is reserved even while hidden so rows don't shift on hover. */
+.row .pin {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  visibility: hidden;
+}
+
+.row.selected .pin,
+.row:hover .pin,
+.row .pin.on {
+  visibility: visible;
+}
+
+.row .pin.on {
+  color: var(--accent);
+}
+
+.row.selected .pin {
+  color: var(--on-block-dim);
+}
+
+.row.selected .pin.on {
+  color: var(--on-block);
+}
+
+.row .pin:hover {
+  color: var(--text);
+}
+
+.row.selected .pin:hover {
+  color: var(--on-block);
+}
+
+.star {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linejoin: miter;
+}
+
+.star.filled {
+  fill: currentColor;
 }
 
 .footer {
   display: flex;
   justify-content: space-between;
-  padding: 7px 16px;
-  font-size: 11px;
-  color: #55555e;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 8px 20px 9px 24px;
+  border-top: 1px solid var(--line);
 }

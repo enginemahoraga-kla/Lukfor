@@ -1,6 +1,7 @@
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -12,6 +13,12 @@ const MAX_DEPTH: usize = 8;
 /// Opening the panel with an index older than this quietly refreshes it, so a
 /// program installed earlier today is findable without anyone pressing Ctrl+R.
 const STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+/// Added to a pinned entry's score. Enough to lift a favorite above matches of
+/// similar quality, not enough to let a scattered subsequence hit outrank the
+/// name the user is plainly typing. Measured for "notes": an exact file name
+/// scores 210, a scattered hit ("Nordic tax export settings") 93, so the
+/// boost has to stay under that ~117 gap.
+const FAVORITE_BOOST: i64 = 100;
 const SKIP_DIRS: &[&str] = &[
     "node_modules",
     ".git",
@@ -25,7 +32,7 @@ const SKIP_DIRS: &[&str] = &[
     "System Volume Information",
 ];
 
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
     App,
@@ -46,6 +53,7 @@ pub struct SearchResult {
     pub path: String,
     pub kind: Kind,
     pub score: i64,
+    pub favorite: bool,
 }
 
 pub type SharedIndex = Arc<RwLock<Vec<Entry>>>;
@@ -78,8 +86,34 @@ impl Indexer {
         self.indexing.load(Ordering::SeqCst)
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
-        search(&self.entries, query, limit)
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        favorites: &HashSet<String>,
+    ) -> Vec<SearchResult> {
+        search(&self.entries, query, limit, favorites)
+    }
+
+    /// Name and kind of the indexed entry at `path`, if there is one.
+    pub fn lookup(&self, path: &str) -> Option<(String, Kind)> {
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .find(|e| e.path == path)
+            .map(|e| (e.name.clone(), e.kind))
+    }
+
+    /// Which of `paths` are currently in the index, in one pass over it.
+    pub fn present(&self, paths: &HashSet<String>) -> HashSet<String> {
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|e| paths.contains(&e.path))
+            .map(|e| e.path.clone())
+            .collect()
     }
 
     /// Is `path` an entry we produced? Callers check this before acting on a
@@ -440,7 +474,12 @@ impl Indexer {
     }
 }
 
-pub fn search(index: &SharedIndex, query: &str, limit: usize) -> Vec<SearchResult> {
+pub fn search(
+    index: &SharedIndex,
+    query: &str,
+    limit: usize,
+    favorites: &HashSet<String>,
+) -> Vec<SearchResult> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return Vec::new();
@@ -465,6 +504,9 @@ pub fn search(index: &SharedIndex, query: &str, limit: usize) -> Vec<SearchResul
             } else if e.name_lower.contains(&q) {
                 score += 40;
             }
+            if favorites.contains(&e.path) {
+                score += FAVORITE_BOOST;
+            }
             // Shorter names that match are usually what the user wants.
             score -= (e.name.len() as i64).min(60) / 4;
             hits.push((score, e));
@@ -478,6 +520,7 @@ pub fn search(index: &SharedIndex, query: &str, limit: usize) -> Vec<SearchResul
             path: e.path.clone(),
             kind: e.kind,
             score,
+            favorite: favorites.contains(&e.path),
         })
         .collect()
 }
@@ -510,7 +553,7 @@ mod tests {
     #[test]
     fn search_ranks_apps_first() {
         let idx = synthetic_index(10_000);
-        let res = search(&idx, "chrome", 20);
+        let res = search(&idx, "chrome", 20, &HashSet::new());
         assert!(!res.is_empty());
         assert_eq!(res[0].name, "Google Chrome");
     }
@@ -519,10 +562,10 @@ mod tests {
     fn search_is_fast_on_large_index() {
         let idx = synthetic_index(250_000);
         // warm-up
-        search(&idx, "report 1234", 20);
+        search(&idx, "report 1234", 20, &HashSet::new());
         let t0 = std::time::Instant::now();
         for q in ["doc", "report-0999", "chrome", "zzz-no-match"] {
-            search(&idx, q, 20);
+            search(&idx, q, 20, &HashSet::new());
         }
         let per_query = t0.elapsed() / 4;
         // Budget: a keystroke must feel instant even on 250k entries.
@@ -535,7 +578,53 @@ mod tests {
     #[test]
     fn empty_query_returns_nothing() {
         let idx = synthetic_index(10);
-        assert!(search(&idx, "  ", 20).is_empty());
+        assert!(search(&idx, "  ", 20, &HashSet::new()).is_empty());
+    }
+
+    fn entry(name: &str, path: &str, kind: Kind) -> Entry {
+        Entry {
+            name: name.into(),
+            name_lower: name.to_lowercase(),
+            path: path.into(),
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_favorite_rises_above_a_slightly_better_match() {
+        // "Notes" alone would win on length; pinning "Notes 2025" must lift it.
+        let idx = Arc::new(RwLock::new(vec![
+            entry("Notes", "C:\\a\\notes", Kind::File),
+            entry("Notes 2025", "C:\\a\\notes-2025", Kind::File),
+        ]));
+        let favs = HashSet::from(["C:\\a\\notes-2025".to_string()]);
+
+        let res = search(&idx, "notes", 20, &favs);
+
+        assert_eq!(res[0].path, "C:\\a\\notes-2025");
+        assert!(res[0].favorite);
+        assert!(!res[1].favorite);
+    }
+
+    #[test]
+    fn a_favorite_that_barely_matches_does_not_bury_an_exact_name() {
+        // The pin lifts favorites among comparable matches; it must not let
+        // a scattered subsequence hit outrank the name the user is typing.
+        // A plain file on purpose: an app's own +120 would hide a boost
+        // that is too strong.
+        let idx = Arc::new(RwLock::new(vec![
+            entry("Notes", "C:\\docs\\notes", Kind::File),
+            entry(
+                "Nordic tax export settings.xlsx",
+                "C:\\docs\\nordic.xlsx",
+                Kind::File,
+            ),
+        ]));
+        let favs = HashSet::from(["C:\\docs\\nordic.xlsx".to_string()]);
+
+        let res = search(&idx, "notes", 20, &favs);
+
+        assert_eq!(res[0].name, "Notes");
     }
 
     /// An Indexer that never runs a real build, so the scheduling rules can be

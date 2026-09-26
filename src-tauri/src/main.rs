@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod clipboard;
+mod favorites;
 mod icons;
 mod indexer;
 
 use clipboard::SharedClips;
+use favorites::{Favorite, Favorites};
 use indexer::Indexer;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -14,6 +16,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 struct AppState {
     indexer: Indexer,
+    favorites: Mutex<Favorites>,
     clips: SharedClips,
     hotkey: Mutex<String>,
     icon_cache: Mutex<HashMap<String, Option<String>>>,
@@ -50,7 +53,50 @@ fn log_line(msg: &str) {
 
 #[tauri::command]
 fn search(query: String, state: tauri::State<AppState>) -> Vec<indexer::SearchResult> {
-    state.indexer.search(&query, 20)
+    let pinned = state.favorites.lock().unwrap().paths();
+    state.indexer.search(&query, 20, &pinned)
+}
+
+#[derive(Serialize)]
+struct FavoriteView {
+    name: String,
+    path: String,
+    kind: indexer::Kind,
+    /// Gone from the index (uninstalled, deleted, moved). Still listed so it
+    /// can be unpinned; hiding it would leave a pin the user can't remove.
+    missing: bool,
+}
+
+#[tauri::command]
+fn list_favorites(state: tauri::State<AppState>) -> Vec<FavoriteView> {
+    let favs = state.favorites.lock().unwrap();
+    // Mid-build, an entry the walk hasn't reached yet isn't missing, so
+    // nothing is flagged until the index is whole.
+    let present = (!state.indexer.is_indexing()).then(|| state.indexer.present(&favs.paths()));
+    favs.items()
+        .iter()
+        .map(|f| FavoriteView {
+            name: f.name.clone(),
+            path: f.path.clone(),
+            kind: f.kind,
+            missing: present.as_ref().is_some_and(|p| !p.contains(&f.path)),
+        })
+        .collect()
+}
+
+/// Pin or unpin `path`; returns whether it is pinned afterwards.
+#[tauri::command]
+fn toggle_favorite(path: String, state: tauri::State<AppState>) -> Result<bool, String> {
+    let mut favs = state.favorites.lock().unwrap();
+    if favs.contains(&path) {
+        favs.unpin(&path).map_err(|e| e.to_string())?;
+        return Ok(false);
+    }
+    // Only indexed entries can be pinned, the same rule open_entry follows.
+    let (name, kind) = state.indexer.lookup(&path).ok_or("unknown entry")?;
+    favs.pin(Favorite { name, path, kind })
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -168,6 +214,7 @@ fn toggle_window(app: &tauri::AppHandle) {
 fn main() {
     let state = AppState {
         indexer: Indexer::new(),
+        favorites: Mutex::new(Favorites::load_default()),
         clips: Arc::new(Mutex::new(VecDeque::new())),
         hotkey: Mutex::new(String::new()),
         icon_cache: Mutex::new(HashMap::new()),
@@ -238,6 +285,8 @@ fn main() {
             clipboard_history,
             get_status,
             reindex,
+            list_favorites,
+            toggle_favorite,
             hide_window
         ])
         .run(tauri::generate_context!())

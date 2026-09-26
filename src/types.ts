@@ -5,6 +5,15 @@ export interface SearchResult {
   path: string;
   kind: EntryKind;
   score: number;
+  favorite: boolean;
+}
+
+export interface FavoriteView {
+  name: string;
+  path: string;
+  kind: EntryKind;
+  /** No longer in the index; listed anyway so it can be unpinned. */
+  missing: boolean;
 }
 
 export interface ClipEntry {
