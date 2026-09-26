@@ -15,6 +15,14 @@ Dibangun dengan Tauri 2 + React + TypeScript.
 | `g: sesuatu` | Buka Google search di browser default |
 | `cb` / `cb kata` | Clipboard history (50 entri terakhir) — Enter menyalin kembali |
 | `reindex` / `refresh` / `update` | Bangun ulang index sekarang (sama dengan `Ctrl+R`) |
+| `Ctrl+D` pada hasil | Pin / lepas favorit (atau klik bintang di baris) |
+
+- **Favorit**: panel yang baru dibuka langsung menampilkan app, file, dan folder
+  yang kamu pin, siap dibuka dengan panah + Enter. Saat mengetik, favorit yang
+  cocok naik ke atas hasil. Tersimpan di `%LOCALAPPDATA%\Lukfor\favorites.json`;
+  favorit yang sudah dihapus atau di-uninstall tetap tampil sebagai "Not found"
+  supaya bisa dilepas.
+- **Tema ikut Windows**: terang atau gelap mengikuti setelan Windows.
 
 - **Semua jenis aplikasi terindeks**, lengkap dengan logo aslinya:
   - Shortcut Start Menu (`.lnk` / `.url`)

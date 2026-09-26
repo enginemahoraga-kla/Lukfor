@@ -2,15 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { evaluate, formatResult, looksLikeMath } from "./calculator";
-import type { ClipEntry, SearchResult, Status } from "./types";
+import { RowContent, pinnablePath, rowKey, type Row } from "./rows";
+import { firstSelectable, nearestSelectable, step } from "./selection";
+import type { ClipEntry, FavoriteView, SearchResult, Status } from "./types";
 
-type Row =
-  | { type: "calc"; expr: string; result: string }
-  | { type: "web"; query: string }
-  | { type: "clip"; entry: ClipEntry }
-  | { type: "entry"; entry: SearchResult }
-  | { type: "reindex" }
-  | { type: "hint"; text: string };
+const EMPTY_TIPS = "Search apps & files  ·  math for calc  ·  g: web  ·  cb clipboard  ·  Ctrl+R reindex";
 
 // Typing any of these (from 3 characters on) offers the rebuild action.
 const REINDEX_WORDS = ["reindex", "refresh", "update"];
@@ -20,56 +16,22 @@ function looksLikeReindex(q: string): boolean {
   return lower.length >= 3 && REINDEX_WORDS.some((w) => w.startsWith(lower));
 }
 
-const KIND_ICON: Record<string, string> = {
-  app: "▸", // ▸
-  folder: "\u{1F4C1}",
-  file: "\u{1F4C4}",
-};
-
-// Icon data URLs per path; null = backend has no icon (keep the glyph).
-const iconCache = new Map<string, string | null>();
-
-function AppIcon({ path }: { path: string }) {
-  const [src, setSrc] = useState<string | null>(iconCache.get(path) ?? null);
-  useEffect(() => {
-    if (iconCache.has(path)) {
-      setSrc(iconCache.get(path) ?? null);
-      return;
-    }
-    let alive = true;
-    invoke<string | null>("get_icon", { path })
-      .then((url) => {
-        iconCache.set(path, url);
-        if (alive) setSrc(url);
-      })
-      .catch(() => {
-        iconCache.set(path, null);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [path]);
-  if (!src) return <span className="icon">{KIND_ICON.app}</span>;
-  return (
-    <span className="icon">
-      <img className="appicon" src={src} alt="" draggable={false} />
-    </span>
-  );
-}
-
-function rowKey(r: Row, i: number): string {
-  return `${r.type}-${i}`;
-}
-
 export default function App() {
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   const [sel, setSel] = useState(0);
   const [status, setStatus] = useState<Status | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  // Bumped to re-run the current query without the user typing, e.g. after a
+  // pin changes what the list should show.
+  const [refreshKey, setRefreshKey] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const seqRef = useRef(0);
+  // After a pin, keep the highlight on the entry that was pinned, wherever the
+  // re-ranked list moved it; a new query starts at the top. Set just before
+  // bumping refreshKey, read once by the effect.
+  const followRef = useRef<{ path: string } | null>(null);
   // A rebuild the user asked for reports when it lands; one the backend started
   // on its own (a stale index refreshing on open) finishes quietly.
   const askedForRebuild = useRef(false);
@@ -78,40 +40,74 @@ export default function App() {
     invoke("hide_window").catch(() => {});
   }, []);
 
-  // Recompute rows whenever the query changes.
+  // Recompute rows whenever the query changes (or a refresh is asked for).
   useEffect(() => {
     const seq = ++seqRef.current;
     const q = query.trim();
+    const follow = followRef.current;
+    followRef.current = null;
+    const show = (next: Row[]) => {
+      setRows(next);
+      if (!follow) {
+        setSel(firstSelectable(next));
+        return;
+      }
+      // Pinning re-ranks the list, so find the entry again by path. If it
+      // left the list (unpinned from favorites), take the nearest neighbour.
+      const at = next.findIndex((r) => pinnablePath(r) === follow.path);
+      setSel((s) => (at >= 0 ? at : nearestSelectable(next, s)));
+    };
 
+    // Empty box: the pinned entries, ready for arrow + Enter.
     if (!q) {
-      setRows([{ type: "hint", text: "Search apps & files  ·  math for calc  ·  g: web  ·  cb clipboard  ·  Ctrl+R reindex" }]);
-      setSel(0);
+      invoke<FavoriteView[]>("list_favorites")
+        .then((favs) => {
+          if (seqRef.current !== seq) return;
+          show(
+            favs.length
+              ? favs.map((fav) => ({ type: "favorite" as const, fav }))
+              : [
+                  { type: "hint", text: "No favorites yet. Select a result and press Ctrl+D to pin it here." },
+                  { type: "hint", text: EMPTY_TIPS },
+                ]
+          );
+        })
+        .catch(() => {
+          if (seqRef.current !== seq) return;
+          show([
+            { type: "hint", text: "Couldn't load favorites. Search still works." },
+            { type: "hint", text: EMPTY_TIPS },
+          ]);
+        });
       return;
     }
 
     // g: web search
     if (/^g:\s*/i.test(q)) {
       const term = q.replace(/^g:\s*/i, "");
-      setRows(term ? [{ type: "web", query: term }] : [{ type: "hint", text: "Keep typing to search Google…" }]);
-      setSel(0);
+      show(term ? [{ type: "web", query: term }] : [{ type: "hint", text: "Keep typing to search Google…" }]);
       return;
     }
 
     // cb → clipboard history
     if (q === "cb" || q.startsWith("cb ")) {
       const filter = q.slice(2).trim().toLowerCase();
-      invoke<ClipEntry[]>("clipboard_history").then((items) => {
-        if (seqRef.current !== seq) return;
-        const filtered = filter
-          ? items.filter((it) => it.text.toLowerCase().includes(filter))
-          : items;
-        setRows(
-          filtered.length
-            ? filtered.slice(0, 30).map((entry) => ({ type: "clip" as const, entry }))
-            : [{ type: "hint", text: "Clipboard history is empty" }]
-        );
-        setSel(0);
-      });
+      invoke<ClipEntry[]>("clipboard_history")
+        .then((items) => {
+          if (seqRef.current !== seq) return;
+          const filtered = filter
+            ? items.filter((it) => it.text.toLowerCase().includes(filter))
+            : items;
+          show(
+            filtered.length
+              ? filtered.slice(0, 30).map((entry) => ({ type: "clip" as const, entry }))
+              : [{ type: "hint", text: "Clipboard history is empty. Copy some text and it shows up here." }]
+          );
+        })
+        .catch(() => {
+          if (seqRef.current !== seq) return;
+          show([{ type: "hint", text: "Couldn't read clipboard history." }]);
+        });
       return;
     }
 
@@ -119,8 +115,7 @@ export default function App() {
     if (looksLikeMath(q)) {
       const val = evaluate(q);
       if (val !== null) {
-        setRows([{ type: "calc", expr: q, result: formatResult(val) }]);
-        setSel(0);
+        show([{ type: "calc", expr: q, result: formatResult(val) }]);
         return;
       }
     }
@@ -128,26 +123,34 @@ export default function App() {
     // "reindex" / "refresh" / "update" offer the rebuild action on top of the
     // normal results, so a file that happens to match is still reachable.
     const head: Row[] = looksLikeReindex(q) ? [{ type: "reindex" }] : [];
-    if (head.length) {
-      setRows(head);
-      setSel(0);
-    }
+    if (head.length) show(head);
 
     // app / file / folder search (debounced lightly)
     const t = setTimeout(() => {
-      invoke<SearchResult[]>("search", { query: q }).then((res) => {
-        if (seqRef.current !== seq) return;
-        const tail: Row[] = res.length
-          ? res.map((entry) => ({ type: "entry" as const, entry }))
-          : head.length
-            ? []
-            : [{ type: "hint", text: "No results — press Enter to search Google" }];
-        setRows([...head, ...tail]);
-        setSel(0);
-      });
+      invoke<SearchResult[]>("search", { query: q })
+        .then((res) => {
+          if (seqRef.current !== seq) return;
+          const tail: Row[] = res.length
+            ? res.map((entry) => ({ type: "entry" as const, entry }))
+            : head.length
+              ? []
+              : [
+                  { type: "hint", text: "No matches in your apps, files or folders." },
+                  { type: "web", query: q },
+                ];
+          show([...head, ...tail]);
+        })
+        .catch(() => {
+          if (seqRef.current !== seq) return;
+          show([
+            ...head,
+            { type: "hint", text: "Search didn't answer. Ctrl+R rebuilds the index." },
+            { type: "web", query: q },
+          ]);
+        });
     }, 40);
     return () => clearTimeout(t);
-  }, [query]);
+  }, [query, refreshKey]);
 
   // Rebuild the index now. The window stays open so the footer can report
   // progress — this is the one action whose result the user waits for.
@@ -158,6 +161,31 @@ export default function App() {
     setFlash(started ? "Rebuilding index…" : "Already rebuilding…");
     invoke<Status>("get_status").then(setStatus).catch(() => {});
   }, []);
+
+  const togglePin = useCallback(async (path: string) => {
+    try {
+      const pinned = await invoke<boolean>("toggle_favorite", { path });
+      setFlash(pinned ? "Pinned" : "Unpinned");
+      followRef.current = { path };
+      setRefreshKey((k) => k + 1);
+    } catch {
+      setFlash("Couldn't save favorites");
+    }
+  }, []);
+
+  // The index can be a little behind the disk (an app uninstalled since the
+  // last rebuild), so opening can fail; say so instead of silently staying put.
+  const openPath = useCallback(
+    async (path: string) => {
+      try {
+        await invoke("open_entry", { path });
+        hide();
+      } catch {
+        setFlash("Couldn't open it. Ctrl+R rebuilds the index");
+      }
+    },
+    [hide]
+  );
 
   const activate = useCallback(
     async (row: Row | undefined) => {
@@ -180,42 +208,48 @@ export default function App() {
           setTimeout(hide, 350);
           break;
         case "entry":
-          await invoke("open_entry", { path: row.entry.path });
-          hide();
+          await openPath(row.entry.path);
+          break;
+        case "favorite":
+          if (row.fav.missing) {
+            setFlash("Not found anymore. Ctrl+D unpins it");
+          } else {
+            await openPath(row.fav.path);
+          }
           break;
         case "reindex":
           await reindex();
           break;
         case "hint":
-          if (query.trim() && !query.trim().startsWith("cb")) {
-            await invoke("open_url", {
-              url: `https://www.google.com/search?q=${encodeURIComponent(query.trim())}`,
-            });
-            hide();
-          }
           break;
       }
     },
-    [hide, query, reindex]
+    [hide, reindex, openPath]
   );
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key.toLowerCase() === "r" && (e.ctrlKey || e.metaKey)) {
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "r") {
         e.preventDefault();
         reindex();
+      } else if (mod && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        const path = pinnablePath(rows[sel]);
+        if (path) togglePin(path);
+        else setFlash("Only apps, files and folders can be pinned");
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSel((s) => Math.min(s + 1, rows.length - 1));
+        setSel((s) => step(rows, s, 1));
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSel((s) => Math.max(s - 1, 0));
+        setSel((s) => step(rows, s, -1));
       } else if (e.key === "Enter") {
         e.preventDefault();
         activate(rows[sel]);
       }
     },
-    [rows, sel, activate, reindex]
+    [rows, sel, activate, reindex, togglePin]
   );
 
   // While a rebuild runs, keep the footer count live and report when it lands.
@@ -253,7 +287,9 @@ export default function App() {
   useEffect(() => {
     const un = listen("lukfor://shown", () => {
       setQuery("");
-      setSel(0);
+      // The box is often already empty, so the query alone wouldn't re-run
+      // the effect; force it so the favorites list is current on every open.
+      setRefreshKey((k) => k + 1);
       setFlash(null);
       invoke<Status>("get_status").then(setStatus).catch(() => {});
       const el = panelRef.current;
@@ -292,87 +328,74 @@ export default function App() {
       ?.scrollIntoView({ block: "nearest" });
   }, [sel]);
 
+  const showingFavorites = rows.some((r) => r.type === "favorite");
+  const activeId = sel >= 0 ? `lukfor-row-${sel}` : undefined;
+
   return (
     <div className="backdrop" onMouseDown={onBackdropClick}>
-      <div className="panel panel-in" ref={panelRef}>
-        <div className="inputWrap">
-          <span className="prompt">&#9670;</span>
-          <input
-            ref={inputRef}
-            autoFocus
-            spellCheck={false}
-            placeholder="Search Lukfor…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={onKeyDown}
-          />
-          {flash && <span className="flash">{flash}</span>}
-        </div>
-        <div className="results">
-          {rows.map((row, i) => (
-            <div
-              key={rowKey(row, i)}
-              data-row={i}
-              className={`row ${i === sel ? "selected" : ""} ${row.type === "hint" ? "hint" : ""}`}
-              onMouseEnter={() => setSel(i)}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                activate(row);
-              }}
-            >
-              {row.type === "calc" && (
-                <>
-                  <span className="icon">=</span>
-                  <span className="name mono">{row.result}</span>
-                  <span className="sub">Enter to copy</span>
-                </>
-              )}
-              {row.type === "web" && (
-                <>
-                  <span className="icon">&#127760;</span>
-                  <span className="name">Search Google for &ldquo;{row.query}&rdquo;</span>
-                </>
-              )}
-              {row.type === "clip" && (
-                <>
-                  <span className="icon">&#128203;</span>
-                  <span className="name clip">{row.entry.text.slice(0, 120)}</span>
-                  <span className="sub">copy</span>
-                </>
-              )}
-              {row.type === "entry" && (
-                <>
-                  {row.entry.kind === "app" ? (
-                    <AppIcon path={row.entry.path} />
-                  ) : (
-                    <span className="icon">{KIND_ICON[row.entry.kind]}</span>
-                  )}
-                  <span className="name">{row.entry.name}</span>
-                  <span className="sub path">
-                    {row.entry.kind === "app" ? "App" : row.entry.path}
-                  </span>
-                </>
-              )}
-              {row.type === "reindex" && (
-                <>
-                  <span className="icon">&#8635;</span>
-                  <span className="name">Rebuild index</span>
-                  <span className="sub">
-                    {status?.indexing ? "running…" : "Ctrl+R · picks up new apps & folders"}
-                  </span>
-                </>
-              )}
-              {row.type === "hint" && <span className="name">{row.text}</span>}
+      <div className="frame">
+        <div className="panel panel-in" ref={panelRef}>
+          <div className="inputWrap">
+            <input
+              ref={inputRef}
+              autoFocus
+              spellCheck={false}
+              placeholder="Search Lukfor…"
+              aria-label="Search apps, files and folders"
+              role="combobox"
+              aria-expanded={rows.length > 0}
+              aria-controls="lukfor-results"
+              aria-activedescendant={activeId}
+              aria-autocomplete="list"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={onKeyDown}
+            />
+            <span className="flash" role="status" aria-live="polite">
+              {flash ?? ""}
+            </span>
+          </div>
+          {showingFavorites && (
+            <div className="section" aria-hidden="true">
+              Favorites
             </div>
-          ))}
-        </div>
-        <div className="footer">
-          <span>{status ? status.hotkey : ""}</span>
-          <span>
-            {status
-              ? `${status.indexed.toLocaleString()} items${status.indexing ? " (indexing…)" : ""}`
-              : ""}
-          </span>
+          )}
+          <div
+            className="results"
+            id="lukfor-results"
+            role="listbox"
+            aria-label={showingFavorites ? "Favorites" : "Results"}
+          >
+            {rows.map((row, i) => {
+              const actionable = row.type !== "hint";
+              return (
+                <div
+                  key={rowKey(row, i)}
+                  id={`lukfor-row-${i}`}
+                  data-row={i}
+                  role="option"
+                  aria-selected={i === sel}
+                  aria-disabled={actionable ? undefined : true}
+                  className={`row ${i === sel ? "selected" : ""} ${actionable ? "" : "hint"}`}
+                  onMouseEnter={actionable ? () => setSel(i) : undefined}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    if (actionable) activate(row);
+                  }}
+                >
+                  <RowContent row={row} indexing={!!status?.indexing} onTogglePin={togglePin} />
+                </div>
+              );
+            })}
+          </div>
+          <div className="footer">
+            <span>{status ? status.hotkey : ""}</span>
+            <span>
+              {status
+                ? `${status.indexed.toLocaleString()} items${status.indexing ? " · indexing" : ""}`
+                : ""}
+            </span>
+          </div>
         </div>
       </div>
     </div>
