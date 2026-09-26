@@ -5,7 +5,11 @@ Arah ini datang dari pemilik produk (jawaban 2026-09-26). Agent hanya merapikan 
 ## Arah dari pemilik
 
 - **Karakter:** gaya ala game Valorant.
-- **Warna aksen:** hijau zamrud / teal.
+- **Warna aksen:** hijau zamrud / teal, ditambah sedikit oranye (2026-09-26).
+  Pembagian tugasnya: teal menandai posisimu (sorotan, fokus, caret), oranye
+  menandai milikmu (bintang favorit, label "Favorites") plus satu garis tipis
+  di sudut potong panel. Oranye tidak pernah diletakkan di atas blok teal
+  (kontrasnya 1,05:1).
 - **Tema:** ikut setelan terang/gelap Windows.
 
 ## Batas
