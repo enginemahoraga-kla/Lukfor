@@ -16,6 +16,8 @@ Dibangun dengan Tauri 2 + React + TypeScript.
 | `cb` / `cb kata` | Clipboard history (50 entri terakhir) — Enter menyalin kembali |
 | `reindex` / `refresh` / `update` | Bangun ulang index sekarang (sama dengan `Ctrl+R`) |
 | `Ctrl+D` pada hasil | Pin / lepas favorit (atau klik bintang di baris) |
+| `↑` `↓` atau `Tab` / `Shift+Tab` | Pindah antar hasil; kursor tetap di kolom ketik |
+| `shutdown` / `restart` / `sleep` (atau `matikan`, `mulai ulang`, `tidur`) | Matikan, mulai ulang, atau tidurkan PC. Enter pertama hanya menyiapkan (baris jadi oranye), Enter kedua yang menjalankan; mengetik, pindah baris, Esc, atau diam 6 detik membatalkan |
 
 - **Favorit**: panel yang baru dibuka langsung menampilkan app, file, dan folder
   yang kamu pin, siap dibuka dengan panah + Enter. Saat mengetik, favorit yang

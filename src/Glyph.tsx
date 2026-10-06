@@ -3,7 +3,17 @@
 // marks read as one family with the rest of the UI. They take the row's text
 // color, which keeps them legible on the solid selection block too.
 
-export type GlyphKind = "app" | "file" | "folder" | "web" | "clip" | "calc" | "reindex";
+export type GlyphKind =
+  | "app"
+  | "file"
+  | "folder"
+  | "web"
+  | "clip"
+  | "calc"
+  | "reindex"
+  | "shutdown"
+  | "restart"
+  | "sleep";
 
 const PATHS: Record<GlyphKind, string> = {
   // Four tiles, the common "apps" mark, for an app with no icon of its own.
@@ -19,6 +29,12 @@ const PATHS: Record<GlyphKind, string> = {
   calc: "M3 6h10 M3 10h10",
   reindex:
     "M13 6.25A5.25 5.25 0 0 0 3.25 5.5 M3 9.75A5.25 5.25 0 0 0 12.75 10.5 M13.25 2v4.25H9 M2.75 14V9.75H7",
+  // The power symbol: a broken ring and a bar.
+  shutdown: "M8 1.75v5.5 M4.6 3.9a5.25 5.25 0 1 0 6.8 0",
+  // One arrow round the ring, so it reads apart from the two-arrow reindex.
+  restart: "M12.9 9.6A5.25 5.25 0 1 1 11.6 4.2 M12.25 1.75v3.5h-3.5",
+  // A crescent.
+  sleep: "M13.25 9.9A5.75 5.75 0 1 1 6.1 2.75a4.5 4.5 0 0 0 7.15 7.15z",
 };
 
 export function Glyph({ kind }: { kind: GlyphKind }) {

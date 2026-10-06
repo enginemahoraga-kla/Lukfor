@@ -4,6 +4,7 @@ mod clipboard;
 mod favorites;
 mod icons;
 mod indexer;
+mod power;
 
 use clipboard::SharedClips;
 use favorites::{Favorite, Favorites};
@@ -69,10 +70,30 @@ struct FavoriteView {
 
 #[tauri::command]
 fn list_favorites(state: tauri::State<AppState>) -> Vec<FavoriteView> {
-    let favs = state.favorites.lock().unwrap();
+    let mut favs = state.favorites.lock().unwrap();
     // Mid-build, an entry the walk hasn't reached yet isn't missing, so
     // nothing is flagged until the index is whole.
-    let present = (!state.indexer.is_indexing()).then(|| state.indexer.present(&favs.paths()));
+    let mut present =
+        (!state.indexer.is_indexing()).then(|| state.indexer.present(&favs.paths()));
+    // An app pin whose copy was dropped as a duplicate follows the copy that
+    // was kept, instead of turning into "Not found" for an app that is there.
+    if let Some(found) = present.as_mut() {
+        let moved: Vec<(String, String)> = favs
+            .items()
+            .iter()
+            .filter(|f| f.kind == indexer::Kind::App && !found.contains(&f.path))
+            .filter_map(|f| Some((f.path.clone(), state.indexer.app_named(&f.name)?)))
+            .collect();
+        for (from, to) in moved {
+            match favs.repoint(&from, &to) {
+                Ok(()) => {
+                    log_line(&format!("favorites: moved pin {from} -> {to}"));
+                    found.insert(to);
+                }
+                Err(e) => log_line(&format!("favorites: could not move pin ({e})")),
+            }
+        }
+    }
     favs.items()
         .iter()
         .map(|f| FavoriteView {
@@ -131,8 +152,12 @@ fn open_url(url: String) -> Result<(), String> {
 
 #[tauri::command]
 fn get_icon(path: String, state: tauri::State<AppState>) -> Option<String> {
-    // Icons only for app entries from our own index — same rule as open_entry.
-    if !state.indexer.holds_app(&path) {
+    // Icons only for app entries we produced: in the index (same rule as
+    // open_entry), or pinned as an app. The pin check matters at startup: the
+    // favorites list asks for icons before the index exists, and the frontend
+    // caches a "no icon" answer for good.
+    let pinned = state.favorites.lock().unwrap().is_pinned_app(&path);
+    if !pinned && !state.indexer.holds_app(&path) {
         return None;
     }
     let mut cache = state.icon_cache.lock().unwrap();
@@ -176,8 +201,24 @@ fn reindex(state: tauri::State<AppState>) -> bool {
     state.indexer.request_rebuild()
 }
 
+/// Shut down, restart or sleep. The panel asks for a second, deliberate
+/// confirmation before calling this.
 #[tauri::command]
-fn hide_window(window: tauri::WebviewWindow) {
+fn power_action(action: power::PowerAction) -> Result<(), String> {
+    power::run(action).inspect_err(|e| log_line(&format!("power: failed: {e}")))
+}
+
+#[tauri::command]
+fn hide_window(window: tauri::WebviewWindow, reason: Option<String>) {
+    // Logged so a "it didn't close" report can be traced: no line here after
+    // an Esc means the keypress never reached the page.
+    let reason: String = reason
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(24)
+        .collect();
+    log_line(&format!("hide: {reason}"));
     let _ = window.hide();
 }
 
@@ -263,9 +304,18 @@ fn main() {
         })
         .on_window_event(|window, event| {
             match event {
+                // Logged because hiding on Esc and on outside clicks both
+                // depend on the window actually getting focus when shown: a
+                // "toggle: show" with no "focus: gained" after it is the tell.
+                WindowEvent::Focused(true) => {
+                    log_line("focus: gained");
+                }
                 // Click outside / focus lost → hide, Spotlight-style.
                 WindowEvent::Focused(false) => {
-                    let _ = window.hide();
+                    if window.is_visible().unwrap_or(false) {
+                        log_line("focus: lost, hiding");
+                        let _ = window.hide();
+                    }
                 }
                 // Closing the window (e.g. Alt+F4) hides it instead; the app
                 // keeps running in the background waiting for the hotkey.
@@ -285,6 +335,7 @@ fn main() {
             clipboard_history,
             get_status,
             reindex,
+            power_action,
             list_favorites,
             toggle_favorite,
             hide_window
