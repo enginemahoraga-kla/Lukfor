@@ -2,9 +2,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { evaluate, formatResult, looksLikeMath } from "./calculator";
+import { ARM_FOR_MS, CONFIRM_AFTER_MS, POWER_TEXT, powerMatches, type PowerAction } from "./power";
 import { RowContent, pinnablePath, rowKey, type Row } from "./rows";
 import { firstSelectable, nearestSelectable, step } from "./selection";
 import type { ClipEntry, FavoriteView, SearchResult, Status } from "./types";
+
+// Shown in turn while the box is empty: the idle state doubles as a way to
+// learn the commands, which otherwise only appear when nothing is pinned.
+const IDLE_HINTS = [
+  "Search Lukfor…",
+  "g: search the web",
+  "cb: clipboard history",
+  "2+2 or sqrt(144): calculator",
+  "Ctrl+D pins the highlighted result",
+  "Tab or arrows move through results",
+  "Ctrl+R picks up new apps",
+];
+const HINT_EVERY_MS = 3500;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const EMPTY_TIPS = "Search apps & files  ·  math for calc  ·  g: web  ·  cb clipboard  ·  Ctrl+R reindex";
 
@@ -22,6 +37,12 @@ export default function App() {
   const [sel, setSel] = useState(0);
   const [status, setStatus] = useState<Status | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  // True while the panel is on screen and focused. Idle motion only runs then,
+  // so a hidden Lukfor costs nothing.
+  const [awake, setAwake] = useState(true);
+  const [hintIndex, setHintIndex] = useState(0);
+  // A power row waiting for its confirming Enter, and when it was armed.
+  const [armed, setArmed] = useState<{ action: PowerAction; at: number } | null>(null);
   // Bumped to re-run the current query without the user typing, e.g. after a
   // pin changes what the list should show.
   const [refreshKey, setRefreshKey] = useState(0);
@@ -36,8 +57,10 @@ export default function App() {
   // on its own (a stale index refreshing on open) finishes quietly.
   const askedForRebuild = useRef(false);
 
-  const hide = useCallback(() => {
-    invoke("hide_window").catch(() => {});
+  // The reason is logged by the backend, so a report of "it didn't close"
+  // can be matched against what the app actually received.
+  const hide = useCallback((reason: string) => {
+    invoke("hide_window", { reason }).catch(() => {});
   }, []);
 
   // Recompute rows whenever the query changes (or a refresh is asked for).
@@ -122,7 +145,10 @@ export default function App() {
 
     // "reindex" / "refresh" / "update" offer the rebuild action on top of the
     // normal results, so a file that happens to match is still reachable.
-    const head: Row[] = looksLikeReindex(q) ? [{ type: "reindex" }] : [];
+    const head: Row[] = [
+      ...powerMatches(q).map((action) => ({ type: "power" as const, action })),
+      ...(looksLikeReindex(q) ? [{ type: "reindex" as const }] : []),
+    ];
     if (head.length) show(head);
 
     // app / file / folder search (debounced lightly)
@@ -179,7 +205,7 @@ export default function App() {
     async (path: string) => {
       try {
         await invoke("open_entry", { path });
-        hide();
+        hide("opened");
       } catch {
         setFlash("Couldn't open it. Ctrl+R rebuilds the index");
       }
@@ -194,18 +220,18 @@ export default function App() {
         case "calc":
           await invoke("copy_text", { text: row.result });
           setFlash("Copied result");
-          setTimeout(hide, 350);
+          setTimeout(() => hide("copied"), 350);
           break;
         case "web":
           await invoke("open_url", {
             url: `https://www.google.com/search?q=${encodeURIComponent(row.query)}`,
           });
-          hide();
+          hide("web");
           break;
         case "clip":
           await invoke("copy_text", { text: row.entry.text });
           setFlash("Copied");
-          setTimeout(hide, 350);
+          setTimeout(() => hide("copied"), 350);
           break;
         case "entry":
           await openPath(row.entry.path);
@@ -220,11 +246,30 @@ export default function App() {
         case "reindex":
           await reindex();
           break;
+        case "power": {
+          // First Enter arms, a later one runs. A second press that comes too
+          // soon (double-click, held key) is ignored rather than accepted.
+          const now = performance.now();
+          if (armed?.action !== row.action) {
+            setArmed({ action: row.action, at: now });
+            setFlash(`Press Enter again to ${POWER_TEXT[row.action].label.toLowerCase()}`);
+            break;
+          }
+          if (now - armed.at < CONFIRM_AFTER_MS) break;
+          setArmed(null);
+          try {
+            await invoke("power_action", { action: row.action });
+            hide("power");
+          } catch {
+            setFlash(`Couldn't ${POWER_TEXT[row.action].label.toLowerCase()}`);
+          }
+          break;
+        }
         case "hint":
           break;
       }
     },
-    [hide, reindex, openPath]
+    [hide, reindex, openPath, armed]
   );
 
   const onKeyDown = useCallback(
@@ -238,6 +283,11 @@ export default function App() {
         const path = pinnablePath(rows[sel]);
         if (path) togglePin(path);
         else setFlash("Only apps, files and folders can be pinned");
+      } else if (e.key === "Tab") {
+        // Down into the list (Shift+Tab back up) while the caret stays in
+        // the box, so typing, arrows and Enter all keep working.
+        e.preventDefault();
+        setSel((s) => step(rows, s, e.shiftKey ? -1 : 1));
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         setSel((s) => step(rows, s, 1));
@@ -276,16 +326,53 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
-        hide();
+        hide("esc");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [hide]);
 
+  // The window blurs whenever it hides (Esc, click outside, opening
+  // something), so blur/focus is the one signal that covers every path.
+  useEffect(() => {
+    const sleep = () => setAwake(false);
+    const wake = () => setAwake(true);
+    const onVisibility = () => setAwake(!document.hidden);
+    window.addEventListener("blur", sleep);
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("blur", sleep);
+      window.removeEventListener("focus", wake);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
+  const idle = awake && query === "";
+
+  // An armed power action is undone by anything that isn't its confirmation:
+  // typing, moving the highlight, hiding the panel, or just waiting.
+  useEffect(() => setArmed(null), [query, sel, awake]);
+  useEffect(() => {
+    if (!armed) return;
+    const id = setTimeout(() => setArmed(null), ARM_FOR_MS);
+    return () => clearTimeout(id);
+  }, [armed]);
+
+  // Rotate the placeholder hints while idle; one state change every few
+  // seconds, nothing at all once typing starts or the panel is hidden.
+  useEffect(() => {
+    if (!idle || reducedMotion) return;
+    const id = setInterval(() => setHintIndex((i) => (i + 1) % IDLE_HINTS.length), HINT_EVERY_MS);
+    return () => clearInterval(id);
+  }, [idle]);
+
   // Window shown → reset + focus + replay fade-in.
   useEffect(() => {
     const un = listen("lukfor://shown", () => {
+      setAwake(true);
+      setHintIndex(0);
       setQuery("");
       // The box is often already empty, so the query alone wouldn't re-run
       // the effect; force it so the favorites list is current on every open.
@@ -313,10 +400,12 @@ export default function App() {
     return () => clearTimeout(id);
   }, [flash, status?.indexing]);
 
-  // Click outside the panel hides the window.
+  // Click outside the panel hides the window. "Outside" is anything not in
+  // the panel, including its clipped-off corners, which hit the wrapper
+  // behind them rather than the backdrop.
   const onBackdropClick = useCallback(
     (e: React.MouseEvent) => {
-      if (e.target === e.currentTarget) hide();
+      if (!panelRef.current?.contains(e.target as Node)) hide("click-outside");
     },
     [hide]
   );
@@ -334,23 +423,39 @@ export default function App() {
   return (
     <div className="backdrop" onMouseDown={onBackdropClick}>
       <div className="frame">
-        <div className="panel panel-in" ref={panelRef}>
-          <div className="inputWrap">
-            <input
-              ref={inputRef}
-              autoFocus
-              spellCheck={false}
-              placeholder="Search Lukfor…"
-              aria-label="Search apps, files and folders"
-              role="combobox"
-              aria-expanded={rows.length > 0}
-              aria-controls="lukfor-results"
-              aria-activedescendant={activeId}
-              aria-autocomplete="list"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={onKeyDown}
-            />
+        <div
+          className="panel panel-in"
+          ref={panelRef}
+          // Keep keyboard focus in the input whatever part of the panel is
+          // clicked; otherwise arrows, Tab and Enter stop answering.
+          onMouseDown={(e) => {
+            if (e.target !== inputRef.current) e.preventDefault();
+          }}
+        >
+          <div className={`inputWrap ${idle ? "idle" : ""}`}>
+            <div className="field">
+              <input
+                ref={inputRef}
+                autoFocus
+                spellCheck={false}
+                aria-label="Search apps, files and folders"
+                role="combobox"
+                aria-expanded={rows.length > 0}
+                aria-controls="lukfor-results"
+                aria-activedescendant={activeId}
+                aria-autocomplete="list"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={onKeyDown}
+              />
+              {query === "" && (
+                // Drawn over the input instead of using `placeholder`, so each
+                // new hint can slide in. Keyed so a change restarts the entry.
+                <span key={hintIndex} className="ghost" aria-hidden="true">
+                  {IDLE_HINTS[hintIndex]}
+                </span>
+              )}
+            </div>
             <span className="flash" role="status" aria-live="polite">
               {flash ?? ""}
             </span>
@@ -376,14 +481,21 @@ export default function App() {
                   role="option"
                   aria-selected={i === sel}
                   aria-disabled={actionable ? undefined : true}
-                  className={`row ${i === sel ? "selected" : ""} ${actionable ? "" : "hint"}`}
+                  className={`row ${i === sel ? "selected" : ""} ${actionable ? "" : "hint"} ${
+                    row.type === "power" && armed?.action === row.action ? "armed" : ""
+                  }`}
                   onMouseEnter={actionable ? () => setSel(i) : undefined}
                   onMouseDown={(e) => {
                     e.preventDefault();
                     if (actionable) activate(row);
                   }}
                 >
-                  <RowContent row={row} indexing={!!status?.indexing} onTogglePin={togglePin} />
+                  <RowContent
+                    row={row}
+                    indexing={!!status?.indexing}
+                    armed={armed?.action ?? null}
+                    onTogglePin={togglePin}
+                  />
                 </div>
               );
             })}

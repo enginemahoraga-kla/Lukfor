@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Glyph, StarGlyph } from "./Glyph";
+import { POWER_TEXT, type PowerAction } from "./power";
 import type { ClipEntry, FavoriteView, SearchResult } from "./types";
 
 export type Row =
@@ -11,6 +12,7 @@ export type Row =
   | { type: "entry"; entry: SearchResult }
   | { type: "favorite"; fav: FavoriteView }
   | { type: "reindex" }
+  | { type: "power"; action: PowerAction }
   | { type: "hint"; text: string };
 
 /** The path a row stands for, if it is something that can be pinned. */
@@ -82,10 +84,13 @@ export function rowKey(r: Row, i: number): string {
 export function RowContent({
   row,
   indexing,
+  armed,
   onTogglePin,
 }: {
   row: Row;
   indexing: boolean;
+  /** The power action waiting for its confirming Enter, if any. */
+  armed: PowerAction | null;
   onTogglePin: (path: string) => void;
 }) {
   switch (row.type) {
@@ -145,6 +150,19 @@ export function RowContent({
           <span className="sub">{indexing ? "running…" : "Ctrl+R · picks up new apps & folders"}</span>
         </>
       );
+    case "power": {
+      const text = POWER_TEXT[row.action];
+      const isArmed = armed === row.action;
+      return (
+        <>
+          <Glyph kind={row.action} />
+          <span className="name">{isArmed ? text.ask : text.label}</span>
+          <span className="sub">
+            {isArmed ? "Enter to confirm · type or Esc to cancel" : "Enter, then Enter again to confirm"}
+          </span>
+        </>
+      );
+    }
     case "hint":
       return <span className="name">{row.text}</span>;
   }

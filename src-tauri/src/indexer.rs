@@ -105,6 +105,18 @@ impl Indexer {
             .map(|e| (e.name.clone(), e.kind))
     }
 
+    /// Path of the indexed app called `name` (case-insensitive), if any. Apps
+    /// are unique by name in the index, so there is at most one.
+    pub fn app_named(&self, name: &str) -> Option<String> {
+        let lower = name.to_lowercase();
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .find(|e| e.kind == Kind::App && e.name_lower == lower)
+            .map(|e| e.path.clone())
+    }
+
     /// Which of `paths` are currently in the index, in one pass over it.
     pub fn present(&self, paths: &HashSet<String>) -> HashSet<String> {
         self.entries
@@ -200,10 +212,17 @@ fn index_apps(out: &mut Vec<Entry>) {
     if let Ok(progdata) = std::env::var("ProgramData") {
         roots.push(Path::new(&progdata).join("Microsoft/Windows/Start Menu/Programs"));
     }
+    // The per-user and all-users Start Menus often hold the same shortcut.
+    let mut seen: HashSet<String> = out.iter().map(|e| e.name_lower.clone()).collect();
     for root in roots {
         for e in WalkDir::new(&root)
             .max_depth(4)
             .into_iter()
+            // Startup holds copies of shortcuts that run at sign-in, not apps
+            // of their own; indexing it only duplicates Start Menu entries.
+            .filter_entry(|e| {
+                !(e.file_type().is_dir() && e.file_name().eq_ignore_ascii_case("Startup"))
+            })
             .filter_map(|e| e.ok())
         {
             let p = e.path();
@@ -216,7 +235,7 @@ fn index_apps(out: &mut Vec<Entry>) {
                     let name = stem.to_string_lossy();
                     // Skip uninstallers and website links that clutter results
                     let lower = name.to_lowercase();
-                    if lower.contains("uninstall") {
+                    if lower.contains("uninstall") || !seen.insert(lower) {
                         continue;
                     }
                     push_entry(out, &name, p, Kind::App);
@@ -298,10 +317,30 @@ fn index_uwp_apps(out: &mut Vec<Entry>) {
 #[cfg(not(windows))]
 fn index_uwp_apps(_out: &mut Vec<Entry>) {}
 
+/// One app per name. `found` pairs each candidate with a rank (lower wins,
+/// so callers pass `(depth, discovery order)`); names already in `taken`,
+/// i.e. already indexed from the Start Menu or the Store, are dropped.
+///
+/// Apps are matched by name rather than by target because the result row
+/// shows only the name: two rows reading "Lirikin · App" are a duplicate to
+/// the user whether or not the shortcuts behind them are byte-identical.
+fn best_per_name(mut found: Vec<((usize, usize), Entry)>, taken: &HashSet<String>) -> Vec<Entry> {
+    found.sort_by_key(|(rank, _)| *rank);
+    let mut seen = taken.clone();
+    found
+        .into_iter()
+        .filter_map(|(_, e)| seen.insert(e.name_lower.clone()).then_some(e))
+        .collect()
+}
+
 /// User folders become file/folder entries, bounded by depth and count.
 /// Batches are handed to `publish` as they fill, so the caller decides whether
 /// they go straight into the live index or into a buffer swapped in at the end.
-fn index_files(total_apps: usize, mut publish: impl FnMut(Vec<Entry>)) {
+fn index_files(
+    total_apps: usize,
+    taken_apps: &HashSet<String>,
+    mut publish: impl FnMut(Vec<Entry>),
+) {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     for d in [
         dirs::desktop_dir(),
@@ -335,6 +374,10 @@ fn index_files(total_apps: usize, mut publish: impl FnMut(Vec<Entry>)) {
 
     let mut count = total_apps;
     let mut batch: Vec<Entry> = Vec::with_capacity(4096);
+    // Launchables are held back until the walk ends: the best copy of a
+    // duplicated shortcut (the shallowest) may turn up after a deeper one.
+    // There are a few hundred at most, so holding them costs nothing.
+    let mut apps: Vec<((usize, usize), Entry)> = Vec::new();
     for root in roots {
         if count >= MAX_ENTRIES {
             break;
@@ -375,18 +418,24 @@ fn index_files(total_apps: usize, mut publish: impl FnMut(Vec<Entry>)) {
                     Kind::File
                 }
             };
-            batch.push(Entry {
+            let entry = Entry {
                 name_lower: name.to_lowercase(),
                 name,
                 path: p.to_string_lossy().to_string(),
                 kind,
-            });
+            };
             count += 1;
+            if kind == Kind::App {
+                apps.push(((e.depth(), apps.len()), entry));
+                continue;
+            }
+            batch.push(entry);
             if batch.len() >= 4096 {
                 publish(std::mem::replace(&mut batch, Vec::with_capacity(4096)));
             }
         }
     }
+    batch.extend(best_per_name(apps, taken_apps));
     if !batch.is_empty() {
         publish(batch);
     }
@@ -413,6 +462,7 @@ fn build_index(ix: &Indexer, mode: Mode) {
     index_apps(&mut apps);
     index_uwp_apps(&mut apps);
     let n_apps = apps.len();
+    let taken: HashSet<String> = apps.iter().map(|e| e.name_lower.clone()).collect();
 
     match mode {
         Mode::Progressive => {
@@ -421,13 +471,13 @@ fn build_index(ix: &Indexer, mode: Mode) {
                 w.clear();
                 w.append(&mut apps);
             }
-            index_files(n_apps, |mut batch| {
+            index_files(n_apps, &taken, |mut batch| {
                 ix.entries.write().unwrap().append(&mut batch);
             });
         }
         Mode::Atomic => {
             let mut fresh = apps;
-            index_files(n_apps, |mut batch| fresh.append(&mut batch));
+            index_files(n_apps, &taken, |mut batch| fresh.append(&mut batch));
             *ix.entries.write().unwrap() = fresh;
         }
     }
@@ -588,6 +638,31 @@ mod tests {
             path: path.into(),
             kind,
         }
+    }
+
+    #[test]
+    fn one_app_per_name_and_the_shallowest_copy_wins() {
+        // The same shortcut copied into a subfolder and into a backup of the
+        // whole Desktop: three rows that all say "Lirikin · App".
+        let found = vec![
+            ((2, 0), entry("Lirikin", "C:\\D\\02 - AI\\Lirikin.lnk", Kind::App)),
+            ((1, 1), entry("Lirikin", "C:\\D\\Lirikin.lnk", Kind::App)),
+            ((1, 2), entry("lirikin", "C:\\D.backup\\Lirikin.lnk", Kind::App)),
+            ((1, 3), entry("Notes", "C:\\D\\Notes.lnk", Kind::App)),
+        ];
+
+        let kept = best_per_name(found, &HashSet::new());
+
+        let paths: Vec<&str> = kept.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["C:\\D\\Lirikin.lnk", "C:\\D\\Notes.lnk"]);
+    }
+
+    #[test]
+    fn a_start_menu_app_beats_a_desktop_copy_of_it() {
+        let found = vec![((1, 0), entry("Word", "C:\\D\\Word.lnk", Kind::App))];
+        let taken = HashSet::from(["word".to_string()]);
+
+        assert!(best_per_name(found, &taken).is_empty());
     }
 
     #[test]

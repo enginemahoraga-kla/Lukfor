@@ -64,6 +64,13 @@ impl Favorites {
         self.items.iter().any(|f| f.path == path)
     }
 
+    /// Pinned, and pinned as an app. Pins were checked against the index when
+    /// they were made, so this vouches for a path while the index is still
+    /// being built (the favorites list asks for icons right at startup).
+    pub fn is_pinned_app(&self, path: &str) -> bool {
+        self.items.iter().any(|f| f.path == path && f.kind == Kind::App)
+    }
+
     /// New pins go to the end, so the ones already there keep their place —
     /// and the number of arrow presses it takes to reach them.
     pub fn pin(&mut self, fav: Favorite) -> io::Result<()> {
@@ -80,6 +87,24 @@ impl Favorites {
             .iter()
             .filter(|f| f.path != path)
             .cloned()
+            .collect();
+        self.commit(next)
+    }
+
+    /// Point the pin at `from` to `to` instead, in the same position. Used when
+    /// the copy a pin pointed at was dropped as a duplicate but another copy
+    /// of the same app is still indexed.
+    pub fn repoint(&mut self, from: &str, to: &str) -> io::Result<()> {
+        if self.contains(to) {
+            return self.unpin(from);
+        }
+        let next = self
+            .items
+            .iter()
+            .map(|f| match f.path == from {
+                true => Favorite { path: to.to_string(), ..f.clone() },
+                false => f.clone(),
+            })
             .collect();
         self.commit(next)
     }
@@ -164,6 +189,40 @@ mod tests {
         favs.pin(fav("C:\\a\\Steam")).unwrap();
         favs.pin(fav("C:\\a\\Steam")).unwrap();
         assert_eq!(favs.items().len(), 1);
+    }
+
+    #[test]
+    fn only_app_pins_count_as_pinned_apps() {
+        let mut favs = Favorites::load(scratch("pinned-app"));
+        favs.pin(fav("C:\\a\\Steam")).unwrap();
+        favs.pin(Favorite {
+            name: "notes".into(),
+            path: "C:\\a\\notes".into(),
+            kind: Kind::Folder,
+        })
+        .unwrap();
+
+        assert!(favs.is_pinned_app("C:\\a\\Steam"));
+        assert!(!favs.is_pinned_app("C:\\a\\notes"), "a folder pin is not an app");
+        assert!(!favs.is_pinned_app("C:\\a\\never-pinned"));
+    }
+
+    #[test]
+    fn a_pin_can_be_moved_to_another_copy_and_keeps_its_place() {
+        let file = scratch("repoint");
+        let mut favs = Favorites::load(file.clone());
+        for p in ["C:\\a\\one", "C:\\backup\\Steam", "C:\\a\\three"] {
+            favs.pin(fav(p)).unwrap();
+        }
+
+        favs.repoint("C:\\backup\\Steam", "C:\\a\\Steam").unwrap();
+
+        let paths: Vec<String> = Favorites::load(file)
+            .items()
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+        assert_eq!(paths, ["C:\\a\\one", "C:\\a\\Steam", "C:\\a\\three"]);
     }
 
     #[test]

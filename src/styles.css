@@ -14,6 +14,9 @@
      the teal block: the pair is 1.05:1 and would vanish. */
   --accent: #22c7a3;       /* teal (owner's pick): caret, focus line, flash; 8.26:1 */
   --warm: #ff8f4a;         /* orange (owner's pick, used sparingly): pins; 7.85:1 */
+  --glint: #b9fbe9;        /* the idle sweep's light: a paler teal riding the teal rule */
+  --on-warm: #0b1a1f;      /* text on an armed (orange) row: 7.85:1 */
+  --on-warm-dim: #4a2410;  /* 5.98:1 */
   --block: #22c7a3;        /* the selected row, the one focal point on screen */
   --on-block: #0b1a1f;     /* 8.26:1 on --block */
   --on-block-dim: #16463d; /* 4.94:1 on --block */
@@ -39,6 +42,9 @@
     --dim: #525d66;          /* 5.46:1 */
     --accent: #076a59;       /* darker teal so it still reads on light: 5.30:1 */
     --warm: #a8470c;         /* burnt orange, the light-ground version: 4.77:1 */
+    --glint: #3fd1ae;        /* on light the rule is dark teal, so the glint is the brighter one */
+    --on-warm: #f4f1ea;      /* 5.21:1 on the burnt orange */
+    --on-warm-dim: #fae6d9;  /* 4.87:1 */
     --block: #076a59;
     --on-block: #f4f1ea;     /* 5.79:1 */
     --on-block-dim: #cfe9e1; /* 5.10:1 */
@@ -142,17 +148,86 @@ body,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .panel-in {
+  .panel-in,
+  .ghost {
     animation: none;
+  }
+  .inputWrap.idle::after {
+    display: none;
   }
 }
 
 .inputWrap {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 16px 28px 13px 20px;
   border-bottom: 2px solid var(--line);
+}
+
+/* Idle: a short light runs along the teal rule, then rests, like a HUD that
+   is armed and waiting. One 140x2px box moved with transform only, so the
+   compositor does it without repainting the panel; it exists only while
+   the box is empty and the panel is on screen. The panel's clip-path hides
+   it once it runs past the right edge. */
+.inputWrap.idle::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 140px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--glint) 78%, var(--warm));
+  transform: translateX(-140px);
+  animation: sweep 4.2s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+  will-change: transform;
+  pointer-events: none;
+}
+
+@keyframes sweep {
+  0% {
+    transform: translateX(-140px);
+  }
+  32%,
+  100% {
+    transform: translateX(660px);
+  }
+}
+
+/* Holds the input and the hint drawn over it. */
+.field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+/* The rotating hint. Same type as the input so it reads as its placeholder;
+   each new hint slides in a few pixels, opacity and transform only. */
+.ghost {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  font-family: var(--font-narrow);
+  font-size: 22px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: none;
+  animation: ghostIn 220ms ease-out;
+}
+
+@keyframes ghostIn {
+  from {
+    opacity: 0;
+    transform: translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* The input's focus indicator, replacing the browser outline: the rule under
@@ -163,7 +238,9 @@ body,
 
 .inputWrap input {
   flex: 1;
+  width: 100%;
   min-width: 0;
+  padding: 0; /* so the hint drawn over it starts exactly at the caret */
   background: transparent;
   border: none;
   outline: none;
@@ -172,11 +249,6 @@ body,
   font-size: 22px;
   font-weight: 400;
   caret-color: var(--accent);
-}
-
-.inputWrap input::placeholder {
-  color: var(--dim);
-  opacity: 1;
 }
 
 .flash {
@@ -237,6 +309,19 @@ body,
     calc(100% - var(--cut-small)) 100%,
     0 100%
   );
+}
+
+/* A power action waiting for its second Enter. Orange here means "the next
+   key does something you can't take back", so the armed state can't be
+   mistaken for an ordinary highlight. */
+.row.selected.armed {
+  background: var(--warm);
+  color: var(--on-warm);
+}
+
+.row.selected.armed .icon,
+.row.selected.armed .sub {
+  color: var(--on-warm-dim);
 }
 
 .row .icon {
